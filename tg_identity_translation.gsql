@@ -1,0 +1,109 @@
+CREATE DISTRIBUTED QUERY tg_identity_translation(
+  STRING input_vertex_type,
+  STRING input_vertex_id,
+  String output_vertex_type
+) FOR GRAPH CEP_Dgtl_EnterpriseIdentityGraph 
+API("V2")
+SYNTAX V1 {
+
+/*
+Author : Prathick K
+Query Name : tg_identity_translation
+Parameters : This Query accepts 3 parameters vertex Name as inputs.
+Example: RUN QUERY tg_identity_translation("DellCookie","12775477777778458456985","ServiceTag")
+Returns    : Top of the target vertex
+Purpose    : To derive the top target vertex that is linked to the source vertex within 7 hop lengths.
+Output     : Provides the target vertex and its type.
+Is Incremental : No
+Date of Creation : 13th September 2024
+Version No       : Initial Version (1.0)
+
+*/
+
+  TYPEDEF tuple<String source_type,vertex source, String targt_type,STRING targt, Datetime disco_date, float edge_weight, int total_hops> best_tup;
+  TYPEDEF HeapAccum<best_tup>(1, total_hops ASC, edge_weight ASC, disco_date DESC) best_heap;
+  GroupByAccum<String targt_type, best_heap best_target_value> @@best_group;  
+  SumAccum<Float> @e_wt;
+  String source_type;
+  vertex source;
+  OrAccum @visited = false;
+  int depth = 1;
+  OrAccum @@is_output_vertex_type = false;
+  
+  //declaring the exceptions
+  EXCEPTION invalid_id(40001);
+  EXCEPTION input_vertex_type_null(40002);
+  EXCEPTION input_vertex_id_null(40003);
+  EXCEPTION output_vertex_type_null(40004);
+  EXCEPTION invalid_output_vertex_type(40005);
+  EXCEPTION no_output_linkage_found(40006);
+  
+  //Checking whether the parameters paased have null values
+  CASE 
+    when input_vertex_type == "" THEN
+      RAISE input_vertex_type_null("Input vertex type cannot be null");
+    when input_vertex_id == "" THEN
+      RAISE input_vertex_id_null("Input vertex id cannot be null");
+    WHEN output_vertex_type == "" THEN
+      RAISE output_vertex_type_null("Output vertex type cannot be null");
+  END;
+      
+  //checking whether the passed input vertex id is valid
+  start = {input_vertex_type};
+  start = SELECT s FROM start:s 
+          WHERE s.id == input_vertex_id; 
+  CASE
+    WHEN start.size()==0 THEN 
+      RAISE invalid_id("Invalid vertex id") ; 
+  END;
+  
+  //checking whether the passed output vertex type is valid
+  output_type = {output_vertex_type};
+  res = SELECT s FROM output_type:s 
+        LIMIT 1;
+      
+  start = SELECT t FROM start:s - (any:e) -> :t
+          ACCUM
+          CASE 
+            WHEN t.type==output_vertex_type THEN
+              @@best_group += (t.type -> best_tup(s.type,s, t.type,t.id, t.disco_dtsz, e.edg_wt, depth)),
+              s.@visited = true,
+              t.@e_wt += e.edg_wt,
+              source = s,
+              source_type = s.type,
+              @@is_output_vertex_type+=true 
+            ELSE
+              s.@visited = true,
+              t.@e_wt += e.edg_wt,
+              source = s,
+              source_type = s.type
+          END        
+          POST-ACCUM
+            t.@visited = true,
+            depth = depth + 1;
+  WHILE (depth <=7 AND start.size() > 0 and @@is_output_vertex_type == false) DO
+    start = SELECT t FROM start:s-(any:e)-> :t 
+            where s.@visited == true and t.@visited == false
+            ACCUM
+            CASE 
+              WHEN t.type==output_vertex_type THEN
+                @@best_group += (t.type -> best_tup(source_type, source, t.type,t.id, t.disco_dtsz, e.edg_wt + s.@e_wt, depth)),
+                t.@e_wt += e.edg_wt + s.@e_wt,
+                @@is_output_vertex_type+=true 
+              ELSE
+                 t.@e_wt += e.edg_wt + s.@e_wt
+            END
+            POST-ACCUM
+              t.@visited = true,
+              depth = depth + 1;
+  END;   
+  CASE
+    WHEN @@best_group.size()!=0 THEN
+      PRINT  @@best_group.get(output_vertex_type).best_target_value.top().targt_type as Target_type, @@best_group.get(output_vertex_type).best_target_value.top().targt as Target_vertex;
+  ELSE
+    RAISE no_output_linkage_found("For the given output vertex type, there are no linkages with input data");
+  END;
+  
+  
+ 
+}

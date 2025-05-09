@@ -1,0 +1,103 @@
+Create distributed Query tg_identity_resolution
+(
+String src_vt_type,  
+String src_vt_id 
+) 
+FOR GRAPH CEP_Dgtl_EnterpriseIdentityGraph 
+API ("V2")
+syntax V1 
+{
+  TYPEDEF tuple<String targt_type, Datetime disco_date, float cost, int total_hop,vertex targt> best_tup;
+  TYPEDEF HeapAccum<best_tup>(1,  total_hop ASC, cost ASC,disco_date DESC) best_heap; 
+  GroupByAccum<String targt_type, best_heap a> @@best_group;
+  SumAccum<Float> @e_wt;
+  String source,v_type;
+  ListAccum<String> @@vertex_list;
+  SetAccum<String> @@vertex_set;
+  OrAccum @visited = false;
+  int depth = 1;
+  @@vertex_list=["EmailAddr","DellCustNum","AcctID","CntctEID","SiteEID","RsdncEID","SalesForceCntctID","SalesForceAcctID","DunsNum"];
+  EXCEPTION src_type_error(40001);
+  EXCEPTION parameter_count(40002);
+  EXCEPTION src_id_error(40003);
+  EXCEPTION no_output_linkage_found(40004);
+  
+  case 
+    when src_vt_type !="" and src_vt_id !="" THEN
+        case 
+          when src_vt_type=="DellCookie" or src_vt_type=="DellID" Then
+          start={src_vt_type};
+          start=select s from start:s where s.id==src_vt_id;
+          case when start.size()!=0 then
+            start=select t from start:s-(any:e)->:t 
+            Accum 
+              case 
+                when (@@vertex_list.contains(t.type) or t.type=="DellID") and s.type=="DellCookie" THEN
+                  s.@visited = true,
+                  t.@e_wt += e.edg_wt,
+                  @@best_group += (t.type -> best_tup(t.type, t.disco_dtsz, e.edg_wt, depth,t)),
+                  v_type=s.type,
+                  @@vertex_set+=t.type
+                  
+                when s.type=="DellID" then
+                  s.@visited = true,
+                  t.@e_wt += e.edg_wt,
+                  @@best_group += (t.type -> best_tup(t.type, s.disco_dtsz, e.edg_wt, depth, t)),
+                  v_type = s.type,
+                  @@vertex_set+=t.type
+              END    
+            POST-ACCUM
+              t.@visited = true,
+              depth = depth + 1;
+              
+            FOREACH i IN @@vertex_set DO
+              IF @@vertex_list.contains(i) THEN
+                  @@vertex_list.removeOne(i);                  
+              END;
+            END;
+            @@vertex_set.clear();
+              
+            WHILE (depth<=7 AND start.size() > 0) and @@vertex_list.size()>0 DO
+              IF @@vertex_set.size()!=0 THEN  
+                FOREACH i IN @@vertex_set DO
+                  IF @@vertex_list.contains(i) THEN
+                    @@vertex_list.removeOne(i);                  
+                  END;
+                END; 
+                @@vertex_set.clear();
+              END;
+
+            start = SELECT t FROM start:s - (any:e) -> :t where t.type!="DellCookie" and s.@visited == true AND t.@visited == false
+            ACCUM
+              case 
+                when @@vertex_list.contains(t.type) THEN
+                  @@best_group += (t.type -> best_tup(t.type, t.disco_dtsz, s.@e_wt+ e.edg_wt, depth,t)),
+                  t.@e_wt += e.edg_wt + s.@e_wt,
+                  @@vertex_set+=t.type
+              
+              ELSE 
+                t.@e_wt += e.edg_wt + s.@e_wt
+              END
+            POST-ACCUM
+              t.@visited = true,
+              depth = depth + 1;
+            END;
+          ELSE
+            Raise src_id_error("Vertex ID is not there in DataBase,Please the Correct Vertex ID..");
+          END;
+        ELSE
+            RAISE src_type_error("Invalid Source Type Excepting DellCookie or DellID");
+        END;
+ELSE
+    RAISE parameter_count("All Parameters Are not Passed, Please Provide the Required Parameters.. ");
+END;
+if @@best_group.size()!=0 THEN
+  FOREACH g in @@best_group DO
+    print g.targt_type as target_type,g.a.top().targt as target_vertex_id;
+  END; 
+ELSE
+  RAISE no_output_linkage_found("There are no identity attributes found for input data")
+  ;
+  END;
+
+}
